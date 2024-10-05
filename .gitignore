@@ -162,4 +162,5 @@ cython_debug/
 #.idea/
 
 
-tokens.py
+# xlsx-файл с данными:
+data.xlsx

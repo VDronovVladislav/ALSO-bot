@@ -1,66 +1,33 @@
-import re
-from datetime import datetime
-from threading import Timer
+"""Бот для рассылки отложенных постов в Telegram."""
+import os
+import time
+import pytz
+from datetime import datetime as dt
+from threading import Thread, Timer
+from dotenv import load_dotenv
 
-from telegram import (Bot, ReplyKeyboardMarkup, InputMediaPhoto,
-                      InlineKeyboardButton, InlineKeyboardMarkup)
+
+from telegram import (Bot, ReplyKeyboardMarkup, InlineKeyboardButton,
+                      InputMediaPhoto,  InputMediaVideo, InlineKeyboardMarkup)
 from telegram.ext import (CommandHandler, MessageHandler, CallbackQueryHandler,
                           Updater, Filters)
 
+from constants import date_format, RETRY_TIME, TIMER_DELAY
+from utils import validate_pub_time, reset_timer, send_message
+
+
+load_dotenv()
+TOKEN = os.getenv('TOKEN')
+
+# Глобальные переменные
 media = []
 posts = []
-date_format = "%d.%m %H:%M"
 timer = None
-TIMER_DELAY = 1
-TIME_PATTERN = r'(0[1-9]|[1-2][0-9]|3[0-1])\.(0[1-9]|1[0-2]) ([0-1][0-9]|2[0-3])\:([0-5][0-9])'
-TELEGRAM_CHAT_IDs = [1111]
-
-
-def send_message(bot, message, post):
-    """Отправляет сообщения в Telegram."""
-    for chat_id in TELEGRAM_CHAT_IDs:
-        bot.send_media_group(chat_id=chat_id, media=post['media'])
-
-
-def validate_pub_time(date, chat_id, context):
-    """Функция проверки даты и времени отправки."""
-    if re.match(TIME_PATTERN, date):
-        if posts:
-            for post in posts:
-                if post['date'] == date:
-                    context.bot.send_message(
-                        chat_id=chat_id,
-                        text='Данное время уже занято другим постом!'
-                    )
-                    return False
-        message = date.split()
-        context.bot.send_message(
-            chat_id=chat_id,
-            text=f'Рассылка начнется {message[0]}.2024 в {message[1]}'
-        )
-        return True
-    if media:
-        context.bot.send_message(
-                chat_id=chat_id,
-                text='Неверный формат даты или времени!'
-            )
-    return False
-
-
-def reset_timer(chat_id, context, message):
-    """Функция обновления таймера и отправки сообщения с установкой времени."""
-    global timer
-    if media:
-        context.bot.send_message(
-            chat_id=chat_id,
-            text='Отправьте время отправки в формате 31.12 13:30'
-        )
-    timer = None
 
 
 def save_post(update, context):
     """Функция сохранения поста."""
-    global timer, posts
+    global timer, posts, media
     chat = update.effective_chat
     message = update.message
     text = update.message.text
@@ -71,57 +38,76 @@ def save_post(update, context):
             text='Пришлите свой пост. Он будет отправлен во все группы!'
         )
 
-    elif text is not None and validate_pub_time(text, chat.id, context):
-        post = {'id': message.message_id,
-                'date': update.message.text,
-                'media': media.copy()}
-        posts.append(post)
-        posts = sorted(
-            posts, key=lambda x: datetime.strptime(x['date'], date_format)
-        )
-        media.clear()
+    elif text is not None:
+        if media:
+            if validate_pub_time(text, chat.id, context, posts):
+                post = {'id': message.message_id,
+                        'date': update.message.text,
+                        'media': media.copy()}
+                posts.append(post)
+                posts = sorted(
+                    posts, key=lambda x: dt.strptime(x['date'], date_format)
+                )
+                media.clear()
+        else:
+            context.bot.send_message(
+                chat_id=chat.id,
+                text='Нет поста для отправки!'
+            )
 
     else:
         if message.media_group_id:
-            media.append(InputMediaPhoto(message.photo[-1].file_id))
+            if message.photo:
+                media.append(InputMediaPhoto(message.photo[-1].file_id))
+            if message.video:
+                media.append(InputMediaVideo(message.video.file_id))
             if message.caption and len(media) == 1:
                 media[0].caption = message.caption
-        else:
-            media.append(InputMediaPhoto(message.photo[-1].file_id))
-            print(message)
-            message.caption = message.caption
+        elif message.photo or message.video:
+            if message.photo:
+                media.append(InputMediaPhoto(message.photo[-1].file_id))
+            if message.video:
+                media.append(InputMediaVideo(message.video.file_id))
+            media[0].caption = message.caption
 
         if timer:
             timer.cancel()
-        timer = Timer(TIMER_DELAY, reset_timer, [chat.id, context, message])
+        timer = Timer(TIMER_DELAY, reset_timer, [chat.id, context, timer])
         timer.start()
 
 
 def post_list(update, context):
     """Показывает список постов."""
+    global posts
     chat = update.effective_chat
-    for post in posts:
-        text = f'ID поста: {post['id']}, Время отправки: {post['date']}'
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "Показать пост", callback_data=f"show_{post['id']}"
-                ),
-                InlineKeyboardButton(
-                    "Удалить пост", callback_data=f"delete_{post['id']}"
-                )
+    if posts:
+        for post in posts:
+            text = f'ID поста: {post['id']}, Время отправки: {post['date']}'
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "Показать пост", callback_data=f"show_{post['id']}"
+                    ),
+                    InlineKeyboardButton(
+                        "Удалить пост", callback_data=f"delete_{post['id']}"
+                    )
+                ]
             ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            context.bot.send_message(
+                    chat_id=chat.id,
+                    text=text,
+                    reply_markup=reply_markup
+                )
+    else:
         context.bot.send_message(
-                chat_id=chat.id,
-                text=text,
-                reply_markup=reply_markup
-            )
+                    chat_id=chat.id,
+                    text='На данный момент нет отложенных постов.',
+                )
 
 
 def show_post(chat_id, post_id, context):
-    """Отправляет пост по нажатию кнопки."""
+    """Отправляет пост для предварительного просмотра по нажатию кнопки."""
     global posts
     for post in posts:
         if post['id'] == post_id:
@@ -135,7 +121,10 @@ def delete_post(chat_id, post_id, context):
     for post in posts:
         if post['id'] == post_id:
             posts.remove(post)
-            context.bot.send_message(chat_id=chat_id, text='Пост удален!')
+            context.bot.send_message(
+                chat_id=chat_id,
+                text=f'Пост {post_id} удален!'
+            )
             break
 
 
@@ -157,31 +146,48 @@ def wake_up(update, context):
     chat = update.effective_chat
     name = update.message.chat.first_name
     buttons = ReplyKeyboardMarkup(
-        [['/newpost'], ['/postlist'], ['/deletepost']],
+        [['/newpost'], ['/postlist']],
         resize_keyboard=True
     )
     context.bot.send_message(
         chat_id=chat.id,
-        text=f'''Привет, {name}
-        Чтобы отправить пост воспользуйтесь командой /newpost
-        Отменить пост можно командой /deletepost
-        Список текущих запланированных постов - /postlist''',
+        text=f'''Привет, {name}!
+Создание поста для рассылки - /newpost
+Список текущих запланированных постов (их удаление и просмотр) - /postlist''',
         reply_markup=buttons
     )
 
 
+def main_sender(bot):
+    """Функция проверки времени и отправки сообщений для отдельного потока."""
+    global posts
+    while True:
+        dt_moscow = dt.now(pytz.timezone('Europe/Moscow'))
+        for post in posts:
+            post_date = dt.strptime(
+                post['date'], date_format
+            ).replace(year=dt.today().year)
+            if str(post_date)[:16] == str(dt_moscow)[:16]:
+                send_message(bot, post)
+                posts.remove(post)
+                break
+        time.sleep(RETRY_TIME)
+
+
 def main():
     """Основная логика работы бота."""
-    bot = Bot(token='xxx')
-    updater = Updater(token='xxx')
+    updater = Updater(token=TOKEN)
+    bot = Bot(token=TOKEN)
     dp = updater.dispatcher
 
     dp.add_handler(CommandHandler('start', wake_up))
     dp.add_handler(CommandHandler('newpost', save_post))
     dp.add_handler(CommandHandler('postlist', post_list))
-    dp.add_handler(CommandHandler('give', show_post))
     dp.add_handler(CallbackQueryHandler(button_handler))
     dp.add_handler(MessageHandler(Filters.all, save_post))
+
+    thread = Thread(target=main_sender, args=(bot,))
+    thread.start()
 
     updater.start_polling(poll_interval=5.0)
     updater.idle()
